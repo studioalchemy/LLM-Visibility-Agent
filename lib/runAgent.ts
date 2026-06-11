@@ -8,7 +8,7 @@ import type { ProviderResult } from './providers/types';
 import { extractBrands, normalizeBrand, isOurBrandMatch } from './extract';
 import { aggregate, type MentionRow } from './metrics';
 import { buildDocxReport } from './report';
-import { sendReport } from './email';
+import { sendReport, isEmailConfigured } from './email';
 import type { Provider, RunSummary } from './types';
 
 export type RunTrigger = 'manual' | 'scheduled';
@@ -164,7 +164,7 @@ export async function runAgent(triggeredBy: RunTrigger): Promise<RunSummary> {
     let emailedTo: string[] = [];
     try {
       const buffer = await buildDocxReport(summary, cfg);
-      if (recipients.length > 0 && process.env.RESEND_API_KEY) {
+      if (recipients.length > 0 && isEmailConfigured()) {
         const filename = `agent4-sov-${new Date()
           .toISOString()
           .slice(0, 10)}.docx`;

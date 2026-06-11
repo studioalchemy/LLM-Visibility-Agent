@@ -1,4 +1,19 @@
-import { Resend } from 'resend';
+// Gmail API delivery using OAuth2 refresh token.
+//
+// One-time setup (see README §1 Email):
+//   1. Google Cloud → new project → enable "Gmail API".
+//   2. OAuth consent screen → External, add your Gmail as test user.
+//   3. Credentials → OAuth 2.0 client → "Desktop" type → save client id + secret.
+//   4. Use the OAuth Playground (https://developers.google.com/oauthplayground)
+//      with your own credentials and scope `https://www.googleapis.com/auth/gmail.send`
+//      to mint a refresh token. Copy it into env.
+//
+// Env required:
+//   GOOGLE_GMAIL_CLIENT_ID
+//   GOOGLE_GMAIL_CLIENT_SECRET
+//   GOOGLE_GMAIL_REFRESH_TOKEN
+//   REPORT_FROM_EMAIL              (the Gmail address that owns the refresh token)
+import { google } from 'googleapis';
 import type { RunSummary } from './types';
 
 export type SendReportArgs = {
@@ -9,7 +24,7 @@ export type SendReportArgs = {
   summary: RunSummary;
 };
 
-function html(summary: RunSummary): string {
+function bodyHtml(summary: RunSummary): string {
   const delta = summary.delta_sov;
   const deltaText =
     delta == null
@@ -29,27 +44,99 @@ function html(summary: RunSummary): string {
   </div>`;
 }
 
+// RFC 2822 / 5322 multipart message with an attachment. Returns the raw
+// message ready to be base64url-encoded for gmail.users.messages.send.
+function buildRawMessage(args: {
+  from: string;
+  to: string[];
+  subject: string;
+  html: string;
+  attachment: { filename: string; content: Buffer; mimeType: string };
+}): string {
+  const boundary = `agent4_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const safeSubject = `=?UTF-8?B?${Buffer.from(args.subject, 'utf8').toString('base64')}?=`;
+  const attachmentB64 = args.attachment.content
+    .toString('base64')
+    // Gmail wants base64 lines wrapped (76 chars) for the legacy MIME case
+    .replace(/(.{76})/g, '$1\r\n');
+
+  const lines = [
+    `From: ${args.from}`,
+    `To: ${args.to.join(', ')}`,
+    `Subject: ${safeSubject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    args.html,
+    '',
+    `--${boundary}`,
+    `Content-Type: ${args.attachment.mimeType}; name="${args.attachment.filename}"`,
+    'Content-Transfer-Encoding: base64',
+    `Content-Disposition: attachment; filename="${args.attachment.filename}"`,
+    '',
+    attachmentB64,
+    '',
+    `--${boundary}--`,
+    '',
+  ];
+  return lines.join('\r\n');
+}
+
+function toBase64Url(s: string): string {
+  return Buffer.from(s, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+export function isEmailConfigured(): boolean {
+  return Boolean(
+    process.env.GOOGLE_GMAIL_CLIENT_ID &&
+      process.env.GOOGLE_GMAIL_CLIENT_SECRET &&
+      process.env.GOOGLE_GMAIL_REFRESH_TOKEN &&
+      process.env.REPORT_FROM_EMAIL,
+  );
+}
+
 export async function sendReport(args: SendReportArgs): Promise<void> {
   const { buffer, filename, recipients, subject, summary } = args;
-
   if (!recipients.length) return;
-  const key = process.env.RESEND_API_KEY;
+
+  const clientId = process.env.GOOGLE_GMAIL_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_GMAIL_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_GMAIL_REFRESH_TOKEN;
   const from = process.env.REPORT_FROM_EMAIL;
-  if (!key || !from) {
-    throw new Error('RESEND_API_KEY or REPORT_FROM_EMAIL not set');
+
+  if (!clientId || !clientSecret || !refreshToken || !from) {
+    throw new Error(
+      'Gmail not configured: need GOOGLE_GMAIL_CLIENT_ID, GOOGLE_GMAIL_CLIENT_SECRET, GOOGLE_GMAIL_REFRESH_TOKEN, REPORT_FROM_EMAIL',
+    );
   }
 
-  const resend = new Resend(key);
-  await resend.emails.send({
+  const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2.setCredentials({ refresh_token: refreshToken });
+  const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+
+  const raw = buildRawMessage({
     from,
     to: recipients,
     subject,
-    html: html(summary),
-    attachments: [
-      {
-        filename,
-        content: buffer,
-      },
-    ],
+    html: bodyHtml(summary),
+    attachment: {
+      filename,
+      content: buffer,
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    },
+  });
+
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: { raw: toBase64Url(raw) },
   });
 }

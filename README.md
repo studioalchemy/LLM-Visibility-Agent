@@ -2,7 +2,7 @@
 
 A control panel that queries ChatGPT, Perplexity, Gemini, and Claude with category-relevant prompts, records which brands appear (with position + sentiment), tracks **our brand's** share of voice over time, and emails a `.docx` report after each run.
 
-Stack: **Next.js (App Router) · Supabase · Resend · docx · chartjs-node-canvas · recharts**.
+Stack: **Next.js (App Router) · Supabase · Gmail API · docx · chartjs-node-canvas · recharts**.
 
 ---
 
@@ -33,20 +33,34 @@ cp .env.example .env.local
 
 Models live in `lib/providers/models.ts` — change them in one place.
 
-### Email
+### Email (Gmail API)
 
-Set `RESEND_API_KEY` and `REPORT_FROM_EMAIL` (a verified sender). If either is missing, runs still complete and the UI still renders results — the `.docx` just isn't emailed.
+Sending uses the Gmail API with an OAuth2 refresh token. One-time setup:
+
+1. **Google Cloud Console** → create or pick a project → APIs & Services → **enable Gmail API**.
+2. **OAuth consent screen** → User Type: External → fill in app name + your support email → add your Gmail address under **Test users**. You can leave the app in "Testing" mode — test users get refresh tokens that don't expire weekly as long as the project is published in production or only used by listed testers.
+3. **Credentials → Create Credentials → OAuth client ID** → Application type **Web application** → add `https://developers.google.com/oauthplayground` as an Authorized redirect URI → save the client ID + client secret.
+4. **Mint a refresh token** using the OAuth Playground:
+   - Go to https://developers.google.com/oauthplayground.
+   - Gear icon (top right) → check **Use your own OAuth credentials** → paste your client ID + secret.
+   - Left panel → scroll to **Gmail API v1** → tick `https://www.googleapis.com/auth/gmail.send` → **Authorize APIs** → sign in as the Gmail account that will send (`REPORT_FROM_EMAIL`).
+   - **Exchange authorization code for tokens** → copy the **Refresh token**.
+5. Drop the four values into env:
+   ```
+   GOOGLE_GMAIL_CLIENT_ID=...
+   GOOGLE_GMAIL_CLIENT_SECRET=...
+   GOOGLE_GMAIL_REFRESH_TOKEN=...
+   REPORT_FROM_EMAIL=you@gmail.com   # must be the account you signed in as in step 4
+   ```
+
+If any of those are missing, runs still complete and the UI still renders results — the `.docx` just isn't emailed.
 
 ### Cron
 
-Two interchangeable modes:
+Two interchangeable modes — pick one, don't run both:
 
-- **Vercel Cron** (recommended in prod). `vercel.json` already declares a poll every hour for `/api/cron/tick`. Set `CRON_SECRET` in Vercel env — Vercel Cron will automatically attach `Authorization: Bearer $CRON_SECRET`.
-- **Node-cron worker** for local/self-host:
-  ```bash
-  npm run worker
-  ```
-  Runs `tick()` immediately on startup and then hourly. Polls the same `agent_config.next_run_at` Supabase column.
+- **Node-cron worker** (this repo's default — runs on Railway). `npm run worker` starts a process that immediately calls `tick()` once and then re-runs hourly. Polls `agent_config.next_run_at` directly via Supabase, so no HTTP endpoint or `CRON_SECRET` is needed.
+- **Vercel Cron** (alternative). Add a `vercel.json` declaring a cron pointing at `/api/cron/tick` and set `CRON_SECRET` in Vercel env — Vercel Cron auto-attaches `Authorization: Bearer $CRON_SECRET`. The endpoint logic is already in place (`app/api/cron/tick/route.ts`).
 
 The cron only *polls*: it does nothing unless `is_active=true` AND `next_run_at <= now()`.
 
